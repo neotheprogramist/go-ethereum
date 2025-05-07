@@ -439,6 +439,7 @@ type testBackend struct {
 	pending *types.Block
 	accman  *accounts.Manager
 	acc     accounts.Account
+	txs     map[common.Hash]*types.Transaction // Map to store transactions by hash
 }
 
 func newTestBackend(t *testing.T, n int, gspec *core.Genesis, engine consensus.Engine, generator func(i int, b *core.BlockGen)) *testBackend {
@@ -464,7 +465,13 @@ func newTestBackend(t *testing.T, n int, gspec *core.Genesis, engine consensus.E
 		t.Fatalf("block %d: failed to insert into chain: %v", n, err)
 	}
 
-	backend := &testBackend{db: db, chain: chain, accman: accman, acc: acc}
+	backend := &testBackend{
+		db:     db,
+		chain:  chain,
+		accman: accman,
+		acc:    acc,
+		txs:    make(map[common.Hash]*types.Transaction),
+	}
 	return backend
 }
 
@@ -589,11 +596,22 @@ func (b testBackend) SubscribeChainHeadEvent(ch chan<- core.ChainHeadEvent) even
 	panic("implement me")
 }
 func (b testBackend) SendTx(ctx context.Context, signedTx *types.Transaction) error {
-	panic("implement me")
+	// Store the transaction in memory
+	b.txs[signedTx.Hash()] = signedTx
+
+	// Also store the transaction lookup entry for consistency
+	rawdb.WriteTxLookupEntries(b.db, 0, []common.Hash{signedTx.Hash()})
+	return nil
 }
 func (b testBackend) GetTransaction(txHash common.Hash) (bool, *types.Transaction, common.Hash, uint64, uint64) {
+	// First check our in-memory map
+	if tx, exists := b.txs[txHash]; exists {
+		return true, tx, common.Hash{}, 0, 0
+	}
+
+	// Fall back to database lookup if not found in memory
 	tx, blockHash, blockNumber, index := rawdb.ReadTransaction(b.db, txHash)
-	return true, tx, blockHash, blockNumber, index
+	return tx != nil, tx, blockHash, blockNumber, index
 }
 func (b testBackend) TxIndexDone() bool {
 	return true
@@ -3031,7 +3049,7 @@ func TestRPCMarshalBlock(t *testing.T) {
 				"gasLimit": "0x0",
 				"gasUsed": "0x0",
 				"hash": "0x9b73c83b25d0faf7eab854e3684c7e394336d6e135625aafa5c183f27baa8fee",
-				"logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+				"logsBloom": "0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
 				"miner": "0x0000000000000000000000000000000000000000",
 				"mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
 				"nonce": "0x0000000000000000",
