@@ -1,0 +1,6 @@
+[package]
+name = "wormhole"
+type = "bin"
+authors = [""]
+
+[dependencies]
