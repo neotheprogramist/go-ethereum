@@ -1,0 +1,4 @@
+- `nargo execute`
+- `bb prove -b ./target/wormhole.json -w ./target/wormhole.gz -o ./target/proof`
+- `bb write_vk -b ./target/wormhole.json -o ./target/vk`
+- `bb verify -k ./target/vk -p ./target/proof`
