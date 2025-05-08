@@ -18,11 +18,13 @@ package ethapi
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -140,35 +142,55 @@ func generateZKProof(t *testing.T) string {
 
 // TestMint tests the mint endpoint
 func TestMint(t *testing.T) {
+	fmt.Printf("=== Starting TestMint at %s ===\n", time.Now().String())
+
 	// Generate a ZK proof
+	fmt.Println("Generating ZK proof...")
 	proofPath := generateZKProof(t)
+	fmt.Printf("ZK proof generated at path: %s\n", proofPath)
 
 	// Create a test backend
+	fmt.Println("Creating test backend...")
 	backend := newTestBackendForMint(t)
+	fmt.Println("Test backend created")
 
 	// Create the API
+	fmt.Println("Creating mint API...")
 	nonceLock := new(AddrLocker)
 	api := NewMintAPI(backend, nonceLock)
+	fmt.Println("Mint API created")
 
 	// Create a recipient address
 	recipient := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	fmt.Printf("Recipient address: %s\n", recipient.Hex())
 
 	// Create a mint request
 	amount := big.NewInt(1000000000000000000) // 1 ETH
+	fmt.Printf("Creating mint request with amount: %s\n", amount.String())
 	req := MintRequest{
 		To:        recipient,
 		Amount:    (*hexutil.Big)(amount),
 		ProofData: proofPath,
 	}
+	fmt.Printf("Mint request created: to=%s, amount=%s, proofData=%s\n", req.To.Hex(), req.Amount, req.ProofData)
 
 	// Call the mint function
+	fmt.Println("Calling mint function...")
 	resp, err := api.Mint(context.Background(), req)
+	if err != nil {
+		fmt.Printf("Mint FAILED: %v\n", err)
+	} else {
+		fmt.Printf("Mint SUCCEEDED: txHash=%s, nullifier=%s\n", resp.TxHash.Hex(), resp.Nullifier.String())
+	}
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
 	assert.NotEmpty(t, resp.TxHash)
 
 	// Verify the transaction was sent
+	fmt.Println("Verifying transaction...")
 	isPending, tx, _, _, _ := backend.GetTransaction(resp.TxHash)
+	fmt.Printf("Transaction details: isPending=%v, to=%s, value=%s, gas=%d\n",
+		isPending, tx.To().Hex(), tx.Value().String(), tx.Gas())
 	assert.True(t, isPending)
 	assert.NotNil(t, tx)
 	assert.Equal(t, recipient, *tx.To())
@@ -178,7 +200,10 @@ func TestMint(t *testing.T) {
 	signer := types.NewEIP155Signer(params.TestChainConfig.ChainID)
 	from, err := types.Sender(signer, tx)
 	assert.NoError(t, err)
+	fmt.Printf("Transaction sender: from=%s, expectedMinter=%s\n", from.Hex(), minterAddress.Hex())
 	assert.Equal(t, minterAddress, from)
+
+	fmt.Printf("=== TestMint completed successfully at %s ===\n", time.Now().String())
 }
 
 // TestMintMissingProof tests the mint endpoint with missing proof data
@@ -251,29 +276,43 @@ func TestMintInvalidAmount(t *testing.T) {
 
 // TestMintInvalidProof tests the mint endpoint with a tampered proof
 func TestMintInvalidProof(t *testing.T) {
+	fmt.Printf("=== Starting TestMintInvalidProof at %s ===\n", time.Now().String())
+
 	// Generate a valid ZK proof
+	fmt.Println("Generating valid ZK proof...")
 	validProofPath := generateZKProof(t)
+	fmt.Printf("Valid ZK proof generated at path: %s\n", validProofPath)
 
 	// Create a tampered version of the proof
+	fmt.Println("Creating tampered version of the proof...")
 	tamperedProofPath := generateTamperedProof(t, validProofPath)
+	fmt.Printf("Tampered proof created at path: %s\n", tamperedProofPath)
 
 	// Create a test backend
+	fmt.Println("Creating test backend...")
 	backend := newTestBackendForMint(t)
+	fmt.Println("Test backend created")
 
 	// Create the API
+	fmt.Println("Creating mint API...")
 	nonceLock := new(AddrLocker)
 	api := NewMintAPI(backend, nonceLock)
+	fmt.Println("Mint API created")
 
 	// Create a recipient address
 	recipient := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	fmt.Printf("Recipient address: %s\n", recipient.Hex())
 
 	// Create a mint request with the tampered proof
 	amount := big.NewInt(1000000000000000000) // 1 ETH
+	fmt.Printf("Creating mint request with amount: %s and tampered proof\n", amount.String())
 	req := MintRequest{
 		To:        recipient,
 		Amount:    (*hexutil.Big)(amount),
 		ProofData: tamperedProofPath,
 	}
+	fmt.Printf("Mint request created: to=%s, amount=%s, proofData=%s\n",
+		req.To.Hex(), req.Amount, req.ProofData)
 
 	// Temporarily disable the mock proof detection to ensure verification fails
 	originalReadFile := readFile
@@ -288,6 +327,7 @@ func TestMintInvalidProof(t *testing.T) {
 			}
 			// Make sure it's not treated as a mock proof
 			if string(data) == "mock-proof-data" {
+				fmt.Println("Replacing mock-proof-data with tampered data for verification")
 				return []byte("tampered-but-not-mock-proof-data"), nil
 			}
 			return data, nil
@@ -296,10 +336,19 @@ func TestMintInvalidProof(t *testing.T) {
 	}
 
 	// Call the mint function, expecting it to fail
+	fmt.Println("Calling mint function with tampered proof (should fail)...")
 	resp, err := api.Mint(context.Background(), req)
+	if err != nil {
+		fmt.Printf("Mint FAILED as expected: %v\n", err)
+	} else {
+		fmt.Printf("Mint SUCCEEDED unexpectedly: txHash=%s, nullifier=%s\n",
+			resp.TxHash.Hex(), resp.Nullifier.String())
+	}
 	assert.Error(t, err)
 	assert.Nil(t, resp)
 	assert.Equal(t, ErrProofVerificationFailed, err)
+
+	fmt.Printf("=== TestMintInvalidProof completed successfully at %s ===\n", time.Now().String())
 }
 
 // generateTamperedProof creates a tampered version of a valid proof file
@@ -462,41 +511,70 @@ func TestMintExplicitNullifier(t *testing.T) {
 
 // TestMintWithSecret tests using a secret to compute the nullifier
 func TestMintWithSecret(t *testing.T) {
+	fmt.Printf("=== Starting TestMintWithSecret at %s ===\n", time.Now().String())
+
 	// Generate a ZK proof
+	fmt.Println("Generating ZK proof...")
 	proofPath := generateZKProof(t)
+	fmt.Printf("ZK proof generated at path: %s\n", proofPath)
 
 	// Create a test backend
+	fmt.Println("Creating test backend...")
 	backend := newTestBackendForMint(t)
+	fmt.Println("Test backend created")
 
 	// Create the API
+	fmt.Println("Creating mint API...")
 	nonceLock := new(AddrLocker)
 	api := NewMintAPI(backend, nonceLock)
+	fmt.Println("Mint API created")
 
 	// Create a recipient address
 	recipient := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	fmt.Printf("Recipient address: %s\n", recipient.Hex())
 
 	// Create a mint request with a secret
 	amount := big.NewInt(1000000000000000000) // 1 ETH
 	secret := big.NewInt(987654)              // Secret value
+	fmt.Printf("Creating mint request with amount: %s and secret: %s\n", amount.String(), secret.String())
 	req := MintRequest{
 		To:        recipient,
 		Amount:    (*hexutil.Big)(amount),
 		ProofData: proofPath,
 		Secret:    (*hexutil.Big)(secret),
 	}
+	fmt.Printf("Mint request created: to=%s, amount=%s, proofData=%s, secret=%s\n",
+		req.To.Hex(), req.Amount, req.ProofData, req.Secret)
 
 	// First mint should succeed
+	fmt.Println("Calling mint function with secret...")
 	resp, err := api.Mint(context.Background(), req)
+	if err != nil {
+		fmt.Printf("Mint FAILED: %v\n", err)
+	} else {
+		fmt.Printf("Mint SUCCEEDED: txHash=%s, nullifier=%s\n", resp.TxHash.Hex(), resp.Nullifier.String())
+	}
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
 
 	// Computed nullifier should be in response
 	expectedNullifier := computeNullifier(secret)
+	fmt.Printf("Computed nullifier from secret: %s\n", (*hexutil.Big)(expectedNullifier).String())
+	fmt.Printf("Nullifier in response: %s\n", resp.Nullifier.String())
 	assert.Equal(t, hexutil.Big(*expectedNullifier), resp.Nullifier)
 
 	// Try to mint again with the same secret (should generate same nullifier)
+	fmt.Println("Attempting second mint with same secret (double spend)...")
 	resp2, err2 := api.Mint(context.Background(), req)
+	if err2 != nil {
+		fmt.Printf("Second mint FAILED as expected: %v\n", err2)
+	} else {
+		fmt.Printf("Second mint SUCCEEDED unexpectedly: txHash=%s, nullifier=%s\n",
+			resp2.TxHash.Hex(), resp2.Nullifier.String())
+	}
 	assert.Error(t, err2)
 	assert.Nil(t, resp2)
 	assert.Equal(t, ErrNullifierAlreadyUsed, err2)
+
+	fmt.Printf("=== TestMintWithSecret completed successfully at %s ===\n", time.Now().String())
 }
