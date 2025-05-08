@@ -46,6 +46,9 @@ var (
 
 	// execCommand is a variable to allow mocking exec.Command in tests
 	execCommand = exec.Command
+
+	// readFile is a variable to allow mocking os.ReadFile in tests
+	readFile = os.ReadFile
 )
 
 // MintAPI provides an API to mint tokens (for testing purposes)
@@ -106,7 +109,7 @@ func (api *MintAPI) Mint(ctx context.Context, req MintRequest) (*MintResponse, e
 	if err != nil {
 		// If we're running in test mode with mock data, we'll allow the verification to pass
 		// This is determined by checking if the proof file contains mock data
-		proofData, readErr := os.ReadFile(req.ProofData)
+		proofData, readErr := readFile(req.ProofData)
 		if readErr == nil && string(proofData) == "mock-proof-data" {
 			log.Info("Mock proof data detected, allowing verification to pass for testing purposes")
 		} else {

@@ -249,6 +249,113 @@ func TestMintInvalidAmount(t *testing.T) {
 	assert.Contains(t, err.Error(), "amount must be greater than 0")
 }
 
+// TestMintInvalidProof tests the mint endpoint with a tampered proof
+func TestMintInvalidProof(t *testing.T) {
+	// Generate a valid ZK proof
+	validProofPath := generateZKProof(t)
+
+	// Create a tampered version of the proof
+	tamperedProofPath := generateTamperedProof(t, validProofPath)
+
+	// Create a test backend
+	backend := newTestBackendForMint(t)
+
+	// Create the API
+	nonceLock := new(AddrLocker)
+	api := NewMintAPI(backend, nonceLock)
+
+	// Create a recipient address
+	recipient := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	// Create a mint request with the tampered proof
+	amount := big.NewInt(1000000000000000000) // 1 ETH
+	req := MintRequest{
+		To:        recipient,
+		Amount:    (*hexutil.Big)(amount),
+		ProofData: tamperedProofPath,
+	}
+
+	// Temporarily disable the mock proof detection to ensure verification fails
+	originalReadFile := readFile
+	defer func() { readFile = originalReadFile }()
+
+	readFile = func(filename string) ([]byte, error) {
+		// This ensures that our tampered proof isn't identified as a mock proof
+		if filename == tamperedProofPath {
+			data, err := originalReadFile(filename)
+			if err != nil {
+				return nil, err
+			}
+			// Make sure it's not treated as a mock proof
+			if string(data) == "mock-proof-data" {
+				return []byte("tampered-but-not-mock-proof-data"), nil
+			}
+			return data, nil
+		}
+		return originalReadFile(filename)
+	}
+
+	// Call the mint function, expecting it to fail
+	resp, err := api.Mint(context.Background(), req)
+	assert.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Equal(t, ErrProofVerificationFailed, err)
+}
+
+// generateTamperedProof creates a tampered version of a valid proof file
+func generateTamperedProof(t *testing.T, validProofPath string) string {
+	// Read the original proof
+	proofData, err := os.ReadFile(validProofPath)
+	if err != nil {
+		t.Fatalf("Failed to read proof file: %v", err)
+	}
+
+	// Create a tampered version of the proof by modifying bytes
+	// If it's a mock proof, we'll just change the content
+	var tamperedData []byte
+	if string(proofData) == "mock-proof-data" {
+		tamperedData = []byte("tampered-proof-data")
+	} else {
+		// If it's a real proof, modify some bytes to make it invalid
+		tamperedData = make([]byte, len(proofData))
+		copy(tamperedData, proofData)
+
+		// Modify at least 20% of the bytes
+		for i := 0; i < len(tamperedData)/5; i++ {
+			// Choose a random position
+			pos := int(tamperedData[i%len(tamperedData)]) % len(tamperedData)
+			// Modify the byte
+			tamperedData[pos] = tamperedData[pos] ^ 0xFF // XOR with all 1's
+		}
+	}
+
+	// Create a new file for the tampered proof
+	tamperedProofDir, err := os.MkdirTemp("", "tampered-proof")
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+
+	// Create the tampered proof file
+	tamperedProofPath := filepath.Join(tamperedProofDir, "tampered_proof")
+	if err := os.WriteFile(tamperedProofPath, tamperedData, 0644); err != nil {
+		t.Fatalf("Failed to write tampered proof file: %v", err)
+	}
+
+	// Copy the vk file to the same directory to ensure the test can find it
+	vkPath := filepath.Join(filepath.Dir(validProofPath), "vk")
+	vkData, err := os.ReadFile(vkPath)
+	if err != nil {
+		t.Fatalf("Failed to read vk file: %v", err)
+	}
+
+	tamperedVkPath := filepath.Join(tamperedProofDir, "vk")
+	if err := os.WriteFile(tamperedVkPath, vkData, 0644); err != nil {
+		t.Fatalf("Failed to write vk file: %v", err)
+	}
+
+	return tamperedProofPath
+}
+
 // newTestBackendForMint creates a test backend with the minter account having funds
 func newTestBackendForMint(t *testing.T) *testBackend {
 	// Create a genesis block with the minter having some initial balance
