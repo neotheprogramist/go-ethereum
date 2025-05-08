@@ -373,3 +373,130 @@ func newTestBackendForMint(t *testing.T) *testBackend {
 
 	return backend
 }
+
+// TestMintDoubleSpending tests the protection against double-spending using nullifiers
+func TestMintDoubleSpending(t *testing.T) {
+	// Generate a ZK proof
+	proofPath := generateZKProof(t)
+
+	// Create a test backend
+	backend := newTestBackendForMint(t)
+
+	// Create the API
+	nonceLock := new(AddrLocker)
+	api := NewMintAPI(backend, nonceLock)
+
+	// Create a recipient address
+	recipient := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	// First mint request
+	amount := big.NewInt(1000000000000000000) // 1 ETH
+	req := MintRequest{
+		To:        recipient,
+		Amount:    (*hexutil.Big)(amount),
+		ProofData: proofPath,
+		// Let the system extract the nullifier from the proof
+	}
+
+	// First mint should succeed
+	resp, err := api.Mint(context.Background(), req)
+	assert.NoError(t, err)
+	assert.NotNil(t, resp)
+	assert.NotEmpty(t, resp.TxHash)
+
+	// Check if nullifier was captured
+	assert.NotEqual(t, hexutil.Big(*big.NewInt(0)), resp.Nullifier, "Expected non-zero nullifier")
+
+	// Try the same mint again, it should be rejected as double-spending
+	resp2, err2 := api.Mint(context.Background(), req)
+	assert.Error(t, err2)
+	assert.Nil(t, resp2)
+	assert.Equal(t, ErrNullifierAlreadyUsed, err2)
+}
+
+// TestMintExplicitNullifier tests using explicitly provided nullifier
+func TestMintExplicitNullifier(t *testing.T) {
+	// Generate a ZK proof
+	proofPath := generateZKProof(t)
+
+	// Create a test backend
+	backend := newTestBackendForMint(t)
+
+	// Create the API
+	nonceLock := new(AddrLocker)
+	api := NewMintAPI(backend, nonceLock)
+
+	// Create a recipient address
+	recipient := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	// Create a mint request with an explicit nullifier
+	amount := big.NewInt(1000000000000000000) // 1 ETH
+	nullifier := big.NewInt(12345)            // Custom nullifier value
+	req := MintRequest{
+		To:        recipient,
+		Amount:    (*hexutil.Big)(amount),
+		ProofData: proofPath,
+		Nullifier: (*hexutil.Big)(nullifier),
+	}
+
+	// First mint should succeed
+	resp, err := api.Mint(context.Background(), req)
+	assert.NoError(t, err)
+	assert.NotNil(t, resp)
+
+	// Check if the response contains our nullifier
+	assert.Equal(t, hexutil.Big(*nullifier), resp.Nullifier)
+
+	// Try to mint again with the same nullifier
+	resp2, err2 := api.Mint(context.Background(), req)
+	assert.Error(t, err2)
+	assert.Nil(t, resp2)
+	assert.Equal(t, ErrNullifierAlreadyUsed, err2)
+
+	// Try a different nullifier, it should succeed
+	req.Nullifier = (*hexutil.Big)(big.NewInt(67890))
+	resp3, err3 := api.Mint(context.Background(), req)
+	assert.NoError(t, err3)
+	assert.NotNil(t, resp3)
+}
+
+// TestMintWithSecret tests using a secret to compute the nullifier
+func TestMintWithSecret(t *testing.T) {
+	// Generate a ZK proof
+	proofPath := generateZKProof(t)
+
+	// Create a test backend
+	backend := newTestBackendForMint(t)
+
+	// Create the API
+	nonceLock := new(AddrLocker)
+	api := NewMintAPI(backend, nonceLock)
+
+	// Create a recipient address
+	recipient := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	// Create a mint request with a secret
+	amount := big.NewInt(1000000000000000000) // 1 ETH
+	secret := big.NewInt(987654)              // Secret value
+	req := MintRequest{
+		To:        recipient,
+		Amount:    (*hexutil.Big)(amount),
+		ProofData: proofPath,
+		Secret:    (*hexutil.Big)(secret),
+	}
+
+	// First mint should succeed
+	resp, err := api.Mint(context.Background(), req)
+	assert.NoError(t, err)
+	assert.NotNil(t, resp)
+
+	// Computed nullifier should be in response
+	expectedNullifier := computeNullifier(secret)
+	assert.Equal(t, hexutil.Big(*expectedNullifier), resp.Nullifier)
+
+	// Try to mint again with the same secret (should generate same nullifier)
+	resp2, err2 := api.Mint(context.Background(), req)
+	assert.Error(t, err2)
+	assert.Nil(t, resp2)
+	assert.Equal(t, ErrNullifierAlreadyUsed, err2)
+}

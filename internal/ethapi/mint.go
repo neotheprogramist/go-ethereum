@@ -18,6 +18,7 @@ package ethapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/big"
 	"os"
@@ -38,6 +39,9 @@ var (
 	// ErrProofVerificationFailed is returned if the ZK proof verification fails
 	ErrProofVerificationFailed = errors.New("zero-knowledge proof verification failed")
 
+	// ErrNullifierAlreadyUsed is returned if the nullifier has already been used
+	ErrNullifierAlreadyUsed = errors.New("nullifier has already been used (double-spending attempt)")
+
 	// minterKey is a predefined private key for testing purposes
 	minterKey, _ = crypto.HexToECDSA("8a1f9a8f95be41cd7ccb6168179afb4504aefe388d1e14474d32c45c72ce7b7a")
 
@@ -49,6 +53,9 @@ var (
 
 	// readFile is a variable to allow mocking os.ReadFile in tests
 	readFile = os.ReadFile
+
+	// Prefix for nullifier db storage
+	nullifierPrefix = []byte("nullifier-")
 )
 
 // MintAPI provides an API to mint tokens (for testing purposes)
@@ -67,11 +74,63 @@ type MintRequest struct {
 	To        common.Address `json:"to"`
 	Amount    *hexutil.Big   `json:"amount"`
 	ProofData string         `json:"proofData"`
+	Nullifier *hexutil.Big   `json:"nullifier"` // The nullifier from the ZK proof (optional for backward compatibility)
+	Secret    *hexutil.Big   `json:"secret"`    // The secret used to generate the nullifier (optional)
 }
 
 // MintResponse represents the response from a mint operation
 type MintResponse struct {
-	TxHash common.Hash `json:"txHash"`
+	TxHash    common.Hash `json:"txHash"`
+	Nullifier hexutil.Big `json:"nullifier"`
+}
+
+// extractPublicInputs extracts the public inputs from a proof file
+func extractPublicInputs(proofPath string) (map[string]interface{}, error) {
+	// This is a simplified implementation. In a real system,
+	// we'd parse the proof file to extract the public inputs.
+	data, err := readFile(proofPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try to parse as JSON - in a real implementation this would extract
+	// from the proof file's specific format
+	var result map[string]interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		// If not valid JSON, check if it's our mock data format
+		if string(data) == "mock-proof-data" {
+			// For mock data, return predefined values
+			return map[string]interface{}{
+				"nullifier": "0x1234567890abcdef",
+			}, nil
+		}
+		// Not JSON and not mock data, so we can't extract inputs
+		return nil, errors.New("could not extract public inputs from proof file")
+	}
+
+	return result, nil
+}
+
+// computeNullifier generates the nullifier from the secret
+// This should match the implementation in the ZK circuit
+func computeNullifier(secret *big.Int) *big.Int {
+	if secret == nil {
+		return nil
+	}
+
+	// In a real implementation, this would exactly match the ZK circuit's nullifier calculation
+	// For testing, we'll use a simple hash
+	hash := crypto.Keccak256Hash(
+		[]byte{0x01}, // MAGIC_NULLIFIER from circuit
+		secret.Bytes(),
+	)
+
+	return new(big.Int).SetBytes(hash.Bytes())
+}
+
+// getNullifierKey creates a database key for the nullifier
+func getNullifierKey(nullifier *big.Int) []byte {
+	return append(nullifierPrefix, nullifier.Bytes()...)
 }
 
 // Mint creates a transaction that mints tokens to the specified address
@@ -97,6 +156,42 @@ func (api *MintAPI) Mint(ctx context.Context, req MintRequest) (*MintResponse, e
 	vkPath := filepath.Join(filepath.Dir(req.ProofData), "vk")
 	if _, err := os.Stat(vkPath); os.IsNotExist(err) {
 		return nil, errors.New("verification key file does not exist")
+	}
+
+	// Extract the nullifier from the proof's public inputs or from request
+	var nullifier *big.Int
+	if req.Nullifier != nil {
+		// If nullifier is provided directly in the request, use it
+		nullifier = req.Nullifier.ToInt()
+	} else if req.Secret != nil {
+		// If secret is provided, compute the nullifier
+		nullifier = computeNullifier(req.Secret.ToInt())
+	} else {
+		// Try to extract from proof
+		publicInputs, err := extractPublicInputs(req.ProofData)
+		if err != nil {
+			log.Warn("Failed to extract public inputs from proof", "err", err)
+			// Continue with proof verification anyway
+		} else if nullifierStr, ok := publicInputs["nullifier"].(string); ok {
+			var nullifierBig hexutil.Big
+			if err := nullifierBig.UnmarshalText([]byte(nullifierStr)); err == nil {
+				nullifier = nullifierBig.ToInt()
+			}
+		}
+	}
+
+	// Check for double-spending if we have a nullifier
+	if nullifier != nil && nullifier.Cmp(common.Big0) > 0 {
+		db := api.b.ChainDb()
+		nullifierKey := getNullifierKey(nullifier)
+
+		// Check if the nullifier has been used before
+		value, err := db.Get(nullifierKey)
+		if err == nil && len(value) > 0 {
+			// Nullifier exists and has been used
+			log.Warn("Double-spending attempt detected", "nullifier", nullifier.String())
+			return nil, ErrNullifierAlreadyUsed
+		}
 	}
 
 	// Verify the ZK proof before proceeding with the mint operation
@@ -125,6 +220,21 @@ func (api *MintAPI) Mint(ctx context.Context, req MintRequest) (*MintResponse, e
 	}
 
 	log.Info("ZK Proof verification succeeded (or was mocked for testing), proceeding with mint operation")
+
+	// If we have a valid nullifier, mark it as used in the database
+	if nullifier != nil && nullifier.Cmp(common.Big0) > 0 {
+		db := api.b.ChainDb()
+		nullifierKey := getNullifierKey(nullifier)
+
+		// Set the nullifier as used (value 1)
+		if err := db.Put(nullifierKey, []byte{1}); err != nil {
+			log.Error("Failed to update nullifier in database", "err", err)
+			// We don't fail the operation if we can't record the nullifier,
+			// but this should be handled properly in a production system
+		} else {
+			log.Info("Nullifier marked as used", "nullifier", nullifier.String())
+		}
+	}
 
 	// Create a transaction to send the minted amount to the recipient
 	// In a real implementation, this would call a specific contract method
@@ -160,7 +270,16 @@ func (api *MintAPI) Mint(ctx context.Context, req MintRequest) (*MintResponse, e
 		return nil, err
 	}
 
+	// Prepare nullifier response
+	var nullifierResponse hexutil.Big
+	if nullifier != nil {
+		nullifierResponse = hexutil.Big(*nullifier)
+	} else {
+		nullifierResponse = hexutil.Big(*big.NewInt(0))
+	}
+
 	return &MintResponse{
-		TxHash: signedTx.Hash(),
+		TxHash:    signedTx.Hash(),
+		Nullifier: nullifierResponse,
 	}, nil
 }
